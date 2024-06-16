@@ -18,8 +18,8 @@
 #include <string.h>
 
 #define NVAR (10)
-//#define USE_FIXED_TPTE (0)
-//#define USE_MIXED_TPTE (1)
+#define USE_FIXED_TPTE (0)
+#define USE_MIXED_TPTE (1)
 #define NSUP (3)
 
 #define USE_GEODESIC_SIGMACUT (1)
@@ -47,7 +47,7 @@ static double mu_i, mu_e, mu_tot;
 // MODEL PARAMETERS: PUBLIC
 double DTd;
 double sigma_cut = 1.0;
-double beta_crit = 5.0;
+double beta_crit = 1.0;
 double sigma_cut_high = -1.0;
 
 // MODEL PARAMETERS: PRIVATE
@@ -77,11 +77,12 @@ double tf;
 //static double t0;
 
 // ELECTRONS
-#define ELECTRONS_CONSTANT (0); //0 : constant TP_OVER_TE
-#define ELECTRON_DUMP (1); //use dump file model (kawazura?)
-#define ELECTRON_BETA (2); //use mixed TP_OVER_TE (beta model)
-#define ELECTRONS_TFLUID (3)//use mixed TP_OVER_TE (beta model) with fluid temperature
-#define ELECTRONS_SPO2023 (4);
+
+#define ELECTRONS_CONSTANT (0) //constant TP_OVER_TE
+#define ELECTRON_DUMP (1) //use dump file model (kawazura?)
+#define ELECTRON_BETA (2) //use mixed TP_OVER_TE (beta model)
+#define ELECTRONS_TFLUID (3) //use mixed TP_OVER_TE (beta model) with fluid temperature
+#define ELECTRONS_SPO2023 (4) //use the temperature ratio model in Satapath et al. 2023 & 2024
 #define ELECTRONS_KORAL (9); //load Te (in Kelvin) from dump file (KORAL etc.)
 
 
@@ -582,10 +583,13 @@ void init_physical_quantities(int n, double rescale_factor)
           fprintf(stderr, "Setting INF beta!\n");
         }
 #endif
-        if (ELECTRONS == 1) {
+        if (!USE_FIXED_TPTE && !USE_MIXED_TPTE){
+          fprintf(stderr, "! no electron temperature model specified in model/iharm.c\n");
+          exit(-3);
+        }else if (ELECTRONS == ELECTRON_DUMP) {
           data[n]->thetae[i][j][k] = data[n]->p[KEL][i][j][k] * 
                                      pow(data[n]->p[KRHO][i][j][k],game-1.)*Thetae_unit;
-        } else if (ELECTRONS == 2) {
+        } else if (ELECTRONS == ELECTRON_BETA) {
           double betasq = beta_m*beta_m / beta_crit/beta_crit;
           double trat = trat_large * betasq/(1. + betasq) + trat_small /(1. + betasq);
           //Thetae_unit = (gam - 1.) * (MP / ME) / trat;
@@ -593,15 +597,15 @@ void init_physical_quantities(int n, double rescale_factor)
           double lcl_Thetae_u = (MP/ME) * (game-1.) * (gamp-1.) / ( (gamp-1.) + (game-1.)*trat );
           Thetae_unit = lcl_Thetae_u;
           data[n]->thetae[i][j][k] = lcl_Thetae_u*data[n]->p[UU][i][j][k]/data[n]->p[KRHO][i][j][k];
-        } else if (ELECTRONS == 4){
-          double q = 1.5;
-          double zeta = 0.2;
+        } else if (ELECTRONS == ELECTRONS_SPO2023){
+          double q = 1.5; //shear
+          double zeta = 0.2; 
           double nR = 1.5;
           double betasq = beta_m * beta_m/beta_crit/beta_crit;
-          double k_eff = 0.42 * sqrt(q * (4. - q)) / 2.;
-          double gam_km = sqrt(sqrt((2. - q) * (2. - q) + k_eff * k_eff) - (k_eff * k_eff + (q - 2.)));
+          double k_eff = 0.42 * sqrt(q * (4. - q)) / 2.; //effective wavenumber
+          double gam_km = sqrt(sqrt((2. - q) * (2. - q) + k_eff * k_eff) - (k_eff * k_eff + (q - 2.))); //growth rate
           double Ps_over_Pa = 0.5 * (q * (2. + 2. * (2. - q) / (k_eff * k_eff + gam_km * gam_km)) - 2.);
-          double f = Ps_over_Pa + 35./(1 + pow(beta_m/15., -1.4));
+          double f = Ps_over_Pa + 35./(1 + pow(beta_m/15., -1.4)); //Qs/QA
           double game = 4./3. + 0.13 * betasq / (1 + betasq);
           double gamp_eff = 1. + 1. / ((1 + 2. * zeta / beta_m) / (gamp - 1.));
           double trat = (gamp_eff - 1.) * (1. - (game - 1.) * (2. - nR)) * f / (game - 1.) / (1. - (gamp_eff - 1.) * (2. - nR) * (1. + 2. * zeta / beta_m));
@@ -609,7 +613,7 @@ void init_physical_quantities(int n, double rescale_factor)
           double lcl_Thetae_u = (MP/ME) * (game-1.) * (gamp-1.) / ( (gamp-1.) + (game-1.)*trat );
           Thetae_unit = lcl_Thetae_u;
           data[n]->thetae[i][j][k] = lcl_Thetae_u*data[n]->p[UU][i][j][k]/data[n]->p[KRHO][i][j][k];
-        } if (ELECTRONS == 9) {
+        } else if (ELECTRONS == ELECTRONS_KORAL) {
           // convert Kelvin -> Thetae
           data[n]->thetae[i][j][k] = data[n]->p[TFLK][i][j][k] * KBOL / ME / CL / CL;
         } else if (ELECTRONS == ELECTRONS_TFLUID) {
@@ -727,19 +731,20 @@ void init_hamr_grid(char *fnam, int dumpidx)
   // we can override which electron model to use here. print results if we're
   // overriding anything. ELECTRONS should only be nonzero if we need to make
   // use of extra variables (instead of just UU and RHO) for thetae
-  if (ELECTRONS == 0) {
+
+  if (ELECTRONS == ELECTRONS_CONSTANT) {
     //ELECTRONS = 0; // force TP_OVER_TE to overwrite bad electrons
     fprintf(stderr, "using fixed tp_over_te ratio = %g\n", tp_over_te);
     //Thetae_unit = MP/ME*(gam-1.)*1./(1. + tp_over_te);
     // see, e.g., Eq. 8 of the EHT GRRT formula list.
     // this formula assumes game = 4./3 and gamp = 5./3
     Thetae_unit = 2./3. * MP/ME / (2. + tp_over_te);
-  } else if (ELECTRONS == 2) {
+  } else if (ELECTRONS == ELECTRON_BETA) {
     //ELECTRONS = 2;
     fprintf(stderr, "using mixed tp_over_te with trat_small = %g, trat_large = %g, and beta_crit = %g\n",
       trat_small, trat_large, beta_crit);
     // Thetae_unit set per-zone below
-  } else if (ELECTRONS == 4){
+  } else if (ELECTRONS == ELECTRONS_SPO2023){
     fprintf(stderr, "using Satapathy 2023, 2024 model, beta_crit = %g\n",beta_crit);
   } else {
     fprintf(stderr, "! please change electron model in model/iharm.c\n");
