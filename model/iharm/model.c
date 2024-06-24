@@ -18,8 +18,8 @@
 #include <string.h>
 
 #define NVAR (10)
-//#define USE_FIXED_TPTE (0)
-//#define USE_MIXED_TPTE (1)
+#define USE_FIXED_TPTE (0)
+#define USE_MIXED_TPTE (1)
 #define NSUP (3)
 
 #define USE_GEODESIC_SIGMACUT (1)
@@ -47,11 +47,11 @@ static double mu_i, mu_e, mu_tot;
 // MODEL PARAMETERS: PUBLIC
 double DTd;
 double sigma_cut = 1.0;
-double beta_crit = 5.0;
+double beta_crit = 1.0;
 double sigma_cut_high = -1.0;
 
-double q = 0.5;
-double nR = 1.5;
+//double q = 0.5;
+//double nR = -1.5;
 
 // MODEL PARAMETERS: PRIVATE
 static char fnam[STRLEN] = "dump.h5";
@@ -80,15 +80,15 @@ double tf;
 //static double t0;
 
 // ELECTRONS
-#define ELECTRONS_CONSTANT (0) //0 : constant TP_OVER_TE
-#define ELECTRON_DUMP (1) //use dump file model (kawazura?)
-#define ELECTRON_BETA (2) //use mixed TP_OVER_TE (beta model)
-#define ELECTRONS_TFLUID (3)//use mixed TP_OVER_TE (beta model) with fluid temperature
-#define ELECTRONS_SPO2023 (4)
-#define ELECTRONS_KORAL (9) //load Te (in Kelvin) from dump file (KORAL etc.)
+#define ELECTRON_CONSTANT (0) // constant TP_OVER_TE
+#define ELECTRON_DUMP (1) // use dump file model (kawazura?)
+#define ELECTRON_BETA (2) // use mixed TP_OVER_TE (beta model)
+#define ELECTRON_TFLUID (3)// use mixed TP_OVER_TE (beta model) with fluid temperature
+#define ELECTRON_SPO2023 (4) // use mixed TP_OVER_TE (Satapathy et al., 2023/2024)
+#define ELECTRON_KORAL (9) // load Te (in Kelvin) from dump file (KORAL etc.)
 
 
-static int RADIATION, ELECTRONS = ELECTRONS_SPO2023;
+static int RADIATION, ELECTRONS = ELECTRON_SPO2023;
 static double gam = 1.444444, game = 1.333333, gamp = 1.666667;
 static double Thetae_unit, Mdotedd;
 
@@ -96,8 +96,6 @@ static double Thetae_unit, Mdotedd;
 static double polar_cut = -1;
 static double th_beg = 0.0174;
 static int nloaded = 0;
-
-double max=0;
 
 static hdf5_blob fluid_header = { 0 };
 
@@ -149,6 +147,9 @@ void try_set_model_parameter(const char *word, const char *value)
 
   set_by_word_val(word, value, "rmax_geo", &rmax_geo, TYPE_DBL);
   set_by_word_val(word, value, "rmin_geo", &rmin_geo, TYPE_DBL);
+
+  //set_by_word_val(word, value, "q", &q, TYPE_DBL);
+  //set_by_word_val(word, value, "nR", &nR, TYPE_DBL);
 
   set_by_word_val(word, value, "reverse_field", &reverse_field, TYPE_INT);
   // allow cutting out the spine
@@ -554,6 +555,27 @@ void set_units()
   fprintf(stderr,"rho,u,B units: %g [g cm^-3] %g [g cm^-1 s^-2] %g [G] \n",RHO_unit,U_unit,B_unit) ;
 }
 
+double get_SPO2023_qshear(double r){
+  // 1st attempt using central difference formula
+  /*double dOmegadr = radial_derivative(i, j, k, Omega); //grid.c, taking Omega as data[n]->p[U2][i][j][k]
+  double r = (i + 0.5) * dx[1];
+  double qshear = - r * dOmegadr / Omega[i][j][k];
+
+  fprintf(stderr, "dOmegadr: %g, Omega: %g, r: %g\n", dOmegadr, Omega[i][j][k], r);;*/
+
+
+  //qshear from S. Dogan & C. J. Nixon (2020), ref from Gammie 2004 and Penna et al. 2013
+  double qshear = 1.5 * (1. - 2. / r + a * a * pow(r, -2)) / (1. - 3. / r + 2. * a * pow(r, -1.5));
+
+  return qshear;
+}
+
+double get_SPO2023_nR(double Ur, double r_isco, double r){
+  double eta = 0.1; //arbitrary parameter
+  double nR = log(Ur / eta) / log(r_isco / r); // intentionally(?) ignore a negative sign here
+  return nR;
+}
+
 void init_physical_quantities(int n, double rescale_factor)
 {
 #if DEBUG
@@ -561,6 +583,11 @@ void init_physical_quantities(int n, double rescale_factor)
 #endif
 
   rescale_factor = sqrt(rescale_factor);
+
+  // copy from /model/riaf/model.c, calulate r_isco
+  double z1 = 1. + pow(1. - a * a, 1. / 3.) * (pow(1. + a, 1. / 3.) + pow(1. - a, 1. / 3.));
+  double z2 = sqrt(3. * a * a + z1 * z1);
+  double r_isco = 3. + z2 - copysign(sqrt((3. - z1) * (3. + z1 + 2. * z2)), a);
 
   // cover everything, even ghost zones
 #pragma omp parallel for collapse(3)
@@ -576,9 +603,10 @@ void init_physical_quantities(int n, double rescale_factor)
 
         double sigma_m = bsq/data[n]->p[KRHO][i][j][k];
         double beta_m = data[n]->p[UU][i][j][k]*(gam-1.)/0.5/bsq;
+
 #if DEBUG
         if(isnan(sigma_m)) {
-          sigma_m = 0;
+          sigma_m = 0; 
           fprintf(stderr, "Setting zero sigma!\n");
         }
         if(isnan(beta_m)) {
@@ -597,27 +625,30 @@ void init_physical_quantities(int n, double rescale_factor)
           double lcl_Thetae_u = (MP/ME) * (game-1.) * (gamp-1.) / ( (gamp-1.) + (game-1.)*trat );
           Thetae_unit = lcl_Thetae_u;
           data[n]->thetae[i][j][k] = lcl_Thetae_u*data[n]->p[UU][i][j][k]/data[n]->p[KRHO][i][j][k];
-        } else if (ELECTRONS == ELECTRONS_SPO2023){
+        } else if (ELECTRONS == ELECTRON_SPO2023){
+          double r = i * dx[1] + startx[1];
+          double qshear = get_SPO2023_qshear(r);
+          double nR = get_SPO2023_nR(data[n]->p[U1][i][j][k], r_isco, r);
+
           double zeta = 0.2;
           double betasq = beta_m * beta_m/beta_crit/beta_crit;
-          double k_eff = 0.42 * sqrt(q * (4. - q)) / 2.;
-          double gam_km = sqrt(sqrt((2. - q) * (2. - q) + k_eff * k_eff) - (k_eff * k_eff + (q - 2.)));
-          double Ps_over_Pa = 0.5 * (q * (2. + 2. * (2. - q) / (k_eff * k_eff + gam_km * gam_km)) - 2.);
+          double k_eff = 0.42 * sqrt(qshear * (4. - qshear)) / 2.;
+          double gam_km = sqrt(sqrt((2. - qshear) * (2. - qshear) + k_eff * k_eff) - (k_eff * k_eff + (qshear - 2.)));
+          double Ps_over_Pa = 0.5 * (qshear * (2. + 2. * (2. - qshear) / (k_eff * k_eff + gam_km * gam_km)) - 2.);
           double f = Ps_over_Pa + 35./(1 + pow(beta_m/15., -1.4));
           double game = 4./3. + 0.13 * betasq / (1 + betasq);
           double gamp_eff = 1. + 1. / ((1 + 2. * zeta / beta_m) / (gamp - 1.));
           double trat = (gamp_eff - 1.) * (1. - (game - 1.) * (2. - nR)) * f / (game - 1.) / (1. - (gamp_eff - 1.) * (2. - nR) * (1. + 2. * zeta / beta_m));
-          if(trat > max){
-            max = trat;
-            fprintf(stderr, "Max: %.3f\n", max);
-          }
+          //debug
+          if (isnan(trat)) fprintf(stderr, "Ur = %.5f, r: %.5f, r_isco: %.5f, qshear: %.5f, nR: %.5f, trat: %.5f\n", data[n]->p[U1][i][j][k], r, r_isco, qshear, nR, trat);
+
           double lcl_Thetae_u = (MP/ME) * (game-1.) * (gamp-1.) / ( (gamp-1.) + (game-1.)*trat );
           Thetae_unit = lcl_Thetae_u;
           data[n]->thetae[i][j][k] = lcl_Thetae_u*data[n]->p[UU][i][j][k]/data[n]->p[KRHO][i][j][k];
         } if (ELECTRONS == 9) {
           // convert Kelvin -> Thetae
           data[n]->thetae[i][j][k] = data[n]->p[TFLK][i][j][k] * KBOL / ME / CL / CL;
-        } else if (ELECTRONS == ELECTRONS_TFLUID) {
+        } else if (ELECTRONS == ELECTRON_TFLUID) {
           double beta = data[n]->p[UU][i][j][k]*(gam-1.)/0.5/bsq;
           double betasq = beta*beta / beta_crit/beta_crit;
           double trat = trat_large * betasq/(1. + betasq) + trat_small /(1. + betasq);
@@ -732,20 +763,20 @@ void init_hamr_grid(char *fnam, int dumpidx)
   // we can override which electron model to use here. print results if we're
   // overriding anything. ELECTRONS should only be nonzero if we need to make
   // use of extra variables (instead of just UU and RHO) for thetae
-  if (ELECTRONS == 0) {
+  if (ELECTRONS == ELECTRON_CONSTANT) {
     //ELECTRONS = 0; // force TP_OVER_TE to overwrite bad electrons
     fprintf(stderr, "using fixed tp_over_te ratio = %g\n", tp_over_te);
     //Thetae_unit = MP/ME*(gam-1.)*1./(1. + tp_over_te);
     // see, e.g., Eq. 8 of the EHT GRRT formula list.
     // this formula assumes game = 4./3 and gamp = 5./3
     Thetae_unit = 2./3. * MP/ME / (2. + tp_over_te);
-  } else if (ELECTRONS == 2) {
+  } else if (ELECTRONS == ELECTRON_BETA) {
     //ELECTRONS = 2;
     fprintf(stderr, "using mixed tp_over_te with trat_small = %g, trat_large = %g, and beta_crit = %g\n",
       trat_small, trat_large, beta_crit);
     // Thetae_unit set per-zone below
-  } else if (ELECTRONS == 4){
-    fprintf(stderr, "using Satapathy 2023, 2024 model, q = %g, nR = %g, beta_crit = %g\n", q, nR, beta_crit);
+  } else if (ELECTRONS == ELECTRON_SPO2023){
+    fprintf(stderr, "using Satapathy 2023, 2024 model, beta_crit = %g\n", beta_crit);
   } else {
     fprintf(stderr, "! please change electron model in model/iharm.c\n");
     exit(-3);
@@ -843,7 +874,7 @@ void init_iharm_grid(char *fnam, int dumpidx)
     fprintf(stderr, "Loaded molecular weights (mu_i, mu_e, mu_tot): %g %g %g\n", mu_i, mu_e, mu_tot);
     Ne_factor = 1. / mu_e;
     hdf5_set_directory("/header/");
-    ELECTRONS = ELECTRONS_TFLUID;
+    ELECTRONS = ELECTRON_TFLUID;
   }
 
   char metric_name[20];
@@ -891,23 +922,23 @@ void init_iharm_grid(char *fnam, int dumpidx)
   // we can override which electron model to use here. print results if we're
   // overriding anything. ELECTRONS should only be nonzero if we need to make
   // use of extra variables (instead of just UU and RHO) for thetae
-  if (ELECTRONS == ELECTRONS_TFLUID) {
+  if (ELECTRONS == ELECTRON_TFLUID) {
     fprintf(stderr, "Using Ressler/Athena electrons with mixed tp_over_te and\n");
     fprintf(stderr, "trat_small = %g, trat_large = %g, and beta_crit = %g\n", trat_small, trat_large, beta_crit);
-  } else if (ELECTRONS == 0) {
+  } else if (ELECTRONS == ELECTRON_CONSTANT) {
     //ELECTRONS = 0; // force TP_OVER_TE to overwrite bad electrons
     fprintf(stderr, "Using fixed tp_over_te ratio = %g\n", tp_over_te);
     //Thetae_unit = MP/ME*(gam-1.)*1./(1. + tp_over_te);
     // see, e.g., Eq. 8 of the EHT GRRT formula list. 
     // this formula assumes game = 4./3 and gamp = 5./3
     Thetae_unit = 2./3. * MP/ME / (2. + tp_over_te);
-  } else if (ELECTRONS == 2) {
+  } else if (ELECTRONS == ELECTRON_BETA) {
     //ELECTRONS = 2;
     fprintf(stderr, "Using mixed tp_over_te with trat_small = %g, trat_large = %g, and beta_crit = %g\n", 
       trat_small, trat_large, beta_crit);
     // Thetae_unit set per-zone below
-  } else if (ELECTRONS == 4){
-    fprintf(stderr, "Using Satapathy 2023, 2024 model, q = %g, nR = %g, beta_crit = %g\n", q, nR, beta_crit);
+  } else if (ELECTRONS == ELECTRON_SPO2023){
+    fprintf(stderr, "Using Satapathy 2023, 2024 model, beta_crit = %g\n", beta_crit);
   } else {
     fprintf(stderr, "Unknown electron model %d! Cannot continue.\n", ELECTRONS);
     exit(-3);
@@ -1227,17 +1258,17 @@ void output_hdf5()
   hdf5_write_single_val(&sigma_cut, "sigma_cut", H5T_IEEE_F64LE);
   hdf5_make_directory("electrons");
   hdf5_set_directory("/header/electrons/");
-  if (ELECTRONS == ELECTRONS_CONSTANT) {
+  if (ELECTRONS == ELECTRON_CONSTANT) {
     hdf5_write_single_val(&tp_over_te, "tp_over_te", H5T_IEEE_F64LE);
   } else if (ELECTRONS == ELECTRON_BETA) {
     hdf5_write_single_val(&trat_small, "rlow", H5T_IEEE_F64LE);
     hdf5_write_single_val(&trat_large, "rhigh", H5T_IEEE_F64LE);
     hdf5_write_single_val(&beta_crit, "beta_crit", H5T_IEEE_F64LE);
-  } else if (ELECTRONS == ELECTRONS_SPO2023){
+  } else if (ELECTRONS == ELECTRON_SPO2023){
     hdf5_write_single_val(&beta_crit, "beta_crit", H5T_IEEE_F64LE);
-    hdf5_write_single_val(&q, "q", H5T_IEEE_F64LE);
-    hdf5_write_single_val(&nR, "nR", H5T_IEEE_F64LE);
-  }else if (ELECTRONS == ELECTRONS_TFLUID) {
+    //hdf5_write_single_val(&q, "q", H5T_IEEE_F64LE);
+    //hdf5_write_single_val(&nR, "nR", H5T_IEEE_F64LE);
+  }else if (ELECTRONS == ELECTRON_TFLUID) {
     hdf5_write_single_val(&mu_i, "mu_i", H5T_IEEE_F64LE);
     hdf5_write_single_val(&mu_e, "mu_e", H5T_IEEE_F64LE);
     hdf5_write_single_val(&mu_tot, "mu_tot", H5T_IEEE_F64LE);
@@ -1835,7 +1866,6 @@ void load_iharm_data(int n, char *fnam, int dumpidx, int verbose)
 {
   // loads relevant information from fluid dump file stored at fname
   // to the n'th copy of data (e.g., for slow light)
-
   double dMact, Ladv;
 
   char fname[256];
@@ -1899,7 +1929,7 @@ void load_iharm_data(int n, char *fnam, int dumpidx, int verbose)
   }
   hdf5_read_single_val(&(data[n]->t), "t", H5T_IEEE_F64LE);
 
-  if (ELECTRONS == ELECTRONS_TFLUID) {
+  if (ELECTRONS == ELECTRON_TFLUID) {
     fstart[3] = 8;
     hdf5_read_array(data[n]->p[THF][0][0], "prims", 4, fdims, fstart, fcount, mdims, mstart, H5T_IEEE_F64LE);
   }

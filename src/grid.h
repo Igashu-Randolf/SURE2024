@@ -15,4 +15,5 @@ int X_in_domain(double X[NDIM]);
 double interp_scalar(double X[NDIM], double ***var);
 double interp_scalar_time(double X[NDIM], double ***varA, double ***varB, double tfac);
 
+double radial_derivative(int i, int j, int k, double ***var);
 #endif // GRID_H
